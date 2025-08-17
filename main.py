@@ -13,16 +13,16 @@ from aiogram.types import (
     Update,
 )
 
-# --------- ENV ----------
+# ---------- ENV ----------
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN is not set")
 
 SUPABASE_URL    = os.getenv("SUPABASE_URL", "")
-SUPABASE_KEY    = os.getenv("SUPABASE_KEY", "")
+SUPABASE_KEY    = os.getenv("SUPABASE_KEY", "")   # anon key допустим
 SUPABASE_BUCKET = os.getenv("SUPABASE_BUCKET", "wb-photos")
 
-# --------- TG ----------
+# ---------- TG ----------
 bot = Bot(BOT_TOKEN)
 dp = Dispatcher()
 router = Router()
@@ -52,30 +52,38 @@ async def photoset(msg: Message):
 async def fake_review(msg: Message):
     await msg.answer("Отправьте фото товара, и я сгенерирую отзыв.")
 
+# ---------- Supabase ----------
 def _public_url(object_path: str) -> str:
-    # Для public-бакета Supabase публичная ссылка формируется так:
     return f"{SUPABASE_URL}/storage/v1/object/public/{SUPABASE_BUCKET}/{object_path}"
 
 async def upload_to_supabase(file_bytes: bytes, suffix: str = ".jpg") -> str:
-    """Загрузка файла в Supabase Storage. Возвращает публичную ссылку."""
+    """
+    Загрузка файла в Supabase Storage. Требуются заголовки Authorization + apikey.
+    Для public-бакета включите INSERT-политику (см. README/инструкции).
+    """
     if not (SUPABASE_URL and SUPABASE_KEY and SUPABASE_BUCKET):
-        raise RuntimeError("Supabase env vars missing (SUPABASE_URL/KEY/BUCKET)")
+        raise RuntimeError("SUPABASE_URL/KEY/BUCKET not set")
+
     filename = f"{int(time.time())}-{uuid.uuid4().hex}{suffix}"
     object_path = f"uploads/{filename}"
     url = f"{SUPABASE_URL}/storage/v1/object/{SUPABASE_BUCKET}/{object_path}"
+
     headers = {
         "Authorization": f"Bearer {SUPABASE_KEY}",
-        "Content-Type": "image/jpeg",
+        "apikey": SUPABASE_KEY,
+        "Content-Type": "application/octet-stream",
         "x-upsert": "true",
     }
+
     async with httpx.AsyncClient(timeout=60) as client:
-        r = await client.post(url, headers=headers, content=file_bytes)
-        r.raise_for_status()
+        resp = await client.post(url, headers=headers, content=file_bytes)
+        resp.raise_for_status()
+
     return _public_url(object_path)
 
 @router.message(F.photo)
 async def on_photo(msg: Message):
-    """Принимаем фото → грузим в Supabase → возвращаем ссылку."""
+    """Принимаем фото → грузим в Supabase → отдаём публичную ссылку."""
     try:
         await msg.answer("📥 Фото получено. Загружаю в облако…")
         ph = msg.photo[-1]  # самое крупное превью
@@ -85,22 +93,17 @@ async def on_photo(msg: Message):
 
         public_link = await upload_to_supabase(img_bytes, suffix=".jpg")
         await msg.answer(f"✅ Залил. Ссылка: {public_link}")
-        # Дальше тут будет вызов генерации (картинки/текст) — позже добавим.
     except Exception as e:
         await msg.answer(f"⚠️ Ошибка загрузки: {e}")
 
 dp.include_router(router)
 
-# --------- FastAPI ----------
+# ---------- FastAPI ----------
 app = FastAPI()
 
 @app.get("/")
 async def root():
     return {"ok": True}
-
-@app.get("/health")
-async def health():
-    return {"status": "healthy"}
 
 @app.post("/webhook")
 async def tg_webhook(request: Request):
