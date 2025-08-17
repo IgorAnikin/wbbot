@@ -8,12 +8,12 @@ from aiogram import Bot, Dispatcher, Router, F
 from aiogram.filters import Command
 from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton, Update
 
-# ---------- ENV ----------
+# ---------- ENV (Railway Variables) ----------
 BOT_TOKEN       = os.getenv("BOT_TOKEN", "")
 SUPABASE_URL    = os.getenv("SUPABASE_URL", "")
 SUPABASE_KEY    = os.getenv("SUPABASE_KEY", "")
 SUPABASE_BUCKET = os.getenv("SUPABASE_BUCKET", "wb-photos")
-FAL_KEY         = os.getenv("FAL_KEY", "")
+FAL_KEY         = os.getenv("FAL_KEY", "")  # ключ fal.ai
 
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN is not set")
@@ -36,90 +36,78 @@ menu_kb = ReplyKeyboardMarkup(
     resize_keyboard=True
 )
 
-MODE_BY_CHAT: dict[int, str | None] = {}
+MODE: dict[int, str | None] = {}
 
 @router.message(Command("start"))
 async def start_cmd(msg: Message):
-    MODE_BY_CHAT[msg.chat.id] = None
-    await msg.answer("Привет! 👋 Выберите действие:", reply_markup=menu_kb)
+    MODE[msg.chat.id] = None
+    await msg.answer("Привет! Выберите действие:", reply_markup=menu_kb)
 
 @router.message(F.text == "📸 Главное фото")
 async def main_photo(msg: Message):
-    MODE_BY_CHAT[msg.chat.id] = "main"
-    await msg.answer("Отправьте фото товара — сделаю главное фото (3:4, студийный стиль).")
+    MODE[msg.chat.id] = "main"
+    await msg.answer("Отправьте фото товара — сделаю главное фото (3:4).")
 
 @router.message(F.text == "📷 Фотосессия (12 снимков)")
-async def photoset(msg: Message):
-    MODE_BY_CHAT[msg.chat.id] = "set"
-    await msg.answer("Отправьте фото товара — соберу серию из 12 снимков в едином стиле.")
+async def set12(msg: Message):
+    MODE[msg.chat.id] = "set"
+    await msg.answer("Отправьте фото товара — соберу 12 снимков в одном стиле.")
 
 @router.message(F.text == "💬 Фейк-отзыв")
-async def fake_review(msg: Message):
-    MODE_BY_CHAT[msg.chat.id] = "review"
-    await msg.answer("Отправьте фото товара — пока верну один кадр (текст прикрутим позже).")
+async def review(msg: Message):
+    MODE[msg.chat.id] = "review"
+    await msg.answer("Отправьте фото товара — пока верну 1 кадр (текст добавим позже).")
 
 # ---------- Supabase ----------
-def _public_url(object_path: str) -> str:
-    return f"{SUPABASE_URL}/storage/v1/object/public/{SUPABASE_BUCKET}/{object_path}"
+def _public_url(path: str) -> str:
+    return f"{SUPABASE_URL}/storage/v1/object/public/{SUPABASE_BUCKET}/{path}"
 
-async def upload_to_supabase(file_bytes: bytes, suffix: str = ".jpg") -> str:
-    filename = f"{int(time.time())}-{uuid.uuid4().hex}{suffix}"
-    object_path = f"uploads/{filename}"
-    url = f"{SUPABASE_URL}/storage/v1/object/{SUPABASE_BUCKET}/{object_path}"
+async def sb_upload(content: bytes, suffix: str = ".jpg") -> str:
+    name = f"uploads/{int(time.time())}-{uuid.uuid4().hex}{suffix}"
+    url  = f"{SUPABASE_URL}/storage/v1/object/{SUPABASE_BUCKET}/{name}"
     headers = {
         "Authorization": f"Bearer {SUPABASE_KEY}",
         "apikey": SUPABASE_KEY,
         "Content-Type": "application/octet-stream",
         "x-upsert": "true",
     }
-    async with httpx.AsyncClient(timeout=120) as client:
-        r = await client.post(url, headers=headers, content=file_bytes)
+    async with httpx.AsyncClient(timeout=120) as c:
+        r = await c.post(url, headers=headers, content=content)
         r.raise_for_status()
-    return _public_url(object_path)
+    return _public_url(name)
 
-# ---------- Fal.ai ----------
-FAL_URL = "https://fal.run/fal-ai/flux-pro"  # универсальный роут; img2img включается полем image_url
+# ---------- Fal.ai (img2img через flux-pro) ----------
+FAL_URL = "https://fal.run/fal-ai/flux-pro"
 
-def presets_for(mode: str) -> tuple[str, int]:
+def preset(mode: str) -> tuple[str, int]:
     if mode == "main":
-        return (
-            "photorealistic ecommerce hero shot, mobile-photography, soft daylight, clean warm bedroom, "
-            "focus on garment details, 3:4 aspect ratio, high resolution, no watermark, no logos, realistic skin",
-            1
-        )
+        return ("photorealistic ecommerce hero shot, soft daylight, clean warm bedroom,"
+                " focus on garment details, 3:4, high resolution, no watermark, realistic skin", 1)
     if mode == "set":
-        return (
-            "photorealistic lifestyle photoshoot for fashion e-commerce, consistent style and lighting, "
-            "mix of full-body, 3/4, side, back, close-up fabric, minimal interior, soft shadow, "
-            "3:4 aspect ratio, high resolution, no watermark, no logos",
-            12
-        )
-    return (
-        "clean studio-like product modeling photo for marketplace, 3:4 aspect ratio, high resolution, "
-        "no watermark, no logos",
-        1
-    )
+        return ("photorealistic lifestyle photoshoot for fashion e-commerce, consistent lighting,"
+                " mix of full-body, 3/4, side, back, close-up fabric, minimal interior, 3:4, high resolution,"
+                " no watermark", 12)
+    return ("clean studio-like product modeling photo for marketplace, 3:4, high resolution, no watermark", 1)
 
-async def fal_generate_img2img(image_url: str, mode: str) -> list[str]:
-    prompt, num_images = presets_for(mode)
-    # ВАЖНО: у fal.ai prompt и прочие поля — в КОРНЕ тела (не в "input")
+async def fal_img2img(image_url: str, mode: str) -> list[str]:
+    p, n = preset(mode)
     payload = {
+        # В fal.ai наличие image_url включает img2img
+        "prompt": p,
         "image_url": image_url,
-        "prompt": prompt,
-        "num_images": num_images,
-        "strength": 0.45,              # бережный denoise: сохраняем ткань/посадку
+        "num_images": n,
+        "strength": 0.45,                 # бережно к ткани
         "guidance_scale": 4.0,
-        "image_size": "3072x4096",     # 3:4
+        # === ФИКС: допускаются только предустановки размера ===
+        # square_hd | square | portrait_4_3 | portrait_16_9 | landscape_4_3 | landscape_16_9
+        "image_size": "portrait_4_3",
         "negative_prompt": "watermark, text, logo, extra fingers, plastic skin, hdr glow, oversmooth"
     }
     headers = {"Authorization": f"Key {FAL_KEY}", "Content-Type": "application/json"}
-
-    async with httpx.AsyncClient(timeout=300) as client:
-        r = await client.post(FAL_URL, headers=headers, json=payload)
+    async with httpx.AsyncClient(timeout=300) as c:
+        r = await c.post(FAL_URL, headers=headers, json=payload)
         r.raise_for_status()
         data = r.json()
-
-    # Ответ может быть в data["images"] или data["output"]["images"]
     images = data.get("images") or data.get("output", {}).get("images") or []
     if not images:
         raise RuntimeError(f"Fal response has no images: {data}")
@@ -129,35 +117,30 @@ async def fal_generate_img2img(image_url: str, mode: str) -> list[str]:
 @router.message(F.photo)
 async def on_photo(msg: Message):
     try:
-        mode = MODE_BY_CHAT.get(msg.chat.id) or "main"
+        mode = MODE.get(msg.chat.id) or "main"
         await msg.answer("📥 Фото получено. Загружаю в облако…")
 
         ph = msg.photo[-1]
         tg_file = await bot.get_file(ph.file_id)
         file_stream = await bot.download_file(tg_file.file_path)
-        img_bytes = file_stream.read()
+        src_bytes = file_stream.read()
 
-        # 1) исходник -> Supabase (получаем публичный URL)
-        src_url = await upload_to_supabase(img_bytes, suffix=".jpg")
-
+        src_url = await sb_upload(src_bytes, ".jpg")
         await msg.answer("🧠 Генерирую через Fal.ai…")
 
-        # 2) генерация
-        gen_urls = await fal_generate_img2img(src_url, mode=mode)
+        gen_urls = await fal_img2img(src_url, mode)
 
-        # 3) загрузка результатов в Supabase и ответ
         if mode == "set" and len(gen_urls) > 1:
             links = []
-            async with httpx.AsyncClient(timeout=180) as client:
+            async with httpx.AsyncClient(timeout=180) as c:
                 for u in gen_urls:
-                    content = (await client.get(u)).content
-                    out_url = await upload_to_supabase(content, suffix=".jpg")
-                    links.append(out_url)
-            await msg.answer("✅ Готово. 12 снимков:\n" + "\n".join(links))
+                    content = (await c.get(u)).content
+                    links.append(await sb_upload(content, ".jpg"))
+            await msg.answer("✅ Готово. 12 ссылок:\n" + "\n".join(links))
         else:
-            async with httpx.AsyncClient(timeout=180) as client:
-                content = (await client.get(gen_urls[0])).content
-            out_url = await upload_to_supabase(content, suffix=".jpg")
+            async with httpx.AsyncClient(timeout=180) as c:
+                content = (await c.get(gen_urls[0])).content
+            out_url = await sb_upload(content, ".jpg")
             await msg.answer_photo(photo=out_url, caption=f"✅ Готово. Ссылка: {out_url}")
 
     except httpx.HTTPStatusError as e:
@@ -167,7 +150,7 @@ async def on_photo(msg: Message):
 
 dp.include_router(router)
 
-# ---------- FastAPI (Webhook) ----------
+# ---------- FastAPI + Webhook ----------
 app = FastAPI()
 
 @app.get("/")
@@ -175,8 +158,7 @@ async def root():
     return {"ok": True}
 
 @app.post("/webhook")
-async def tg_webhook(request: Request):
-    data = await request.json()
-    update = Update.model_validate(data)
+async def webhook(request: Request):
+    update = Update.model_validate(await request.json())
     await dp.feed_update(bot, update)
     return {"ok": True}
