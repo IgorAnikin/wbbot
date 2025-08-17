@@ -22,7 +22,7 @@ if not (SUPABASE_URL and SUPABASE_KEY and SUPABASE_BUCKET):
 if not FAL_KEY:
     raise RuntimeError("FAL_KEY is not set")
 
-# ---------- TG ----------
+# ---------- Telegram ----------
 bot = Bot(BOT_TOKEN)
 dp = Dispatcher()
 router = Router()
@@ -36,7 +36,6 @@ menu_kb = ReplyKeyboardMarkup(
     resize_keyboard=True
 )
 
-# Память режима на чат
 MODE_BY_CHAT: dict[int, str | None] = {}
 
 @router.message(Command("start"))
@@ -57,7 +56,7 @@ async def photoset(msg: Message):
 @router.message(F.text == "💬 Фейк-отзыв")
 async def fake_review(msg: Message):
     MODE_BY_CHAT[msg.chat.id] = "review"
-    await msg.answer("Отправьте фото товара — пока верну один кадр (текст отзыва прикрутим позже).")
+    await msg.answer("Отправьте фото товара — пока верну один кадр (текст прикрутим позже).")
 
 # ---------- Supabase ----------
 def _public_url(object_path: str) -> str:
@@ -79,7 +78,7 @@ async def upload_to_supabase(file_bytes: bytes, suffix: str = ".jpg") -> str:
     return _public_url(object_path)
 
 # ---------- Fal.ai ----------
-FAL_URL = "https://fal.run/fal-ai/flux-pro"   # универсальный роут; тип = по полю input
+FAL_URL = "https://fal.run/fal-ai/flux-pro"  # универсальный роут; img2img включается полем image_url
 
 def presets_for(mode: str) -> tuple[str, int]:
     if mode == "main":
@@ -103,16 +102,15 @@ def presets_for(mode: str) -> tuple[str, int]:
 
 async def fal_generate_img2img(image_url: str, mode: str) -> list[str]:
     prompt, num_images = presets_for(mode)
+    # ВАЖНО: у fal.ai prompt и прочие поля — в КОРНЕ тела (не в "input")
     payload = {
-        "input": {
-            "image_url": image_url,        # img2img (референс)
-            "prompt": prompt,
-            "num_images": num_images,
-            "strength": 0.45,              # бережно к ткани/посадке
-            "guidance_scale": 4.0,
-            "image_size": "3072x4096",     # 3:4
-            "negative_prompt": "watermark, text, logo, extra fingers, plastic skin, hdr glow, oversmooth"
-        }
+        "image_url": image_url,
+        "prompt": prompt,
+        "num_images": num_images,
+        "strength": 0.45,              # бережный denoise: сохраняем ткань/посадку
+        "guidance_scale": 4.0,
+        "image_size": "3072x4096",     # 3:4
+        "negative_prompt": "watermark, text, logo, extra fingers, plastic skin, hdr glow, oversmooth"
     }
     headers = {"Authorization": f"Key {FAL_KEY}", "Content-Type": "application/json"}
 
@@ -121,6 +119,7 @@ async def fal_generate_img2img(image_url: str, mode: str) -> list[str]:
         r.raise_for_status()
         data = r.json()
 
+    # Ответ может быть в data["images"] или data["output"]["images"]
     images = data.get("images") or data.get("output", {}).get("images") or []
     if not images:
         raise RuntimeError(f"Fal response has no images: {data}")
@@ -181,5 +180,3 @@ async def tg_webhook(request: Request):
     update = Update.model_validate(data)
     await dp.feed_update(bot, update)
     return {"ok": True}
-
-
