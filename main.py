@@ -54,3 +54,8 @@ async def tg_webhook(request: Request):
 @app.get("/")
 async def root():
     return {"ok": True}
+
+@router.message(F.photo)
+async def on_photo(msg: Message):
+    await msg.answer("📥 Фото получено. Обрабатываю…")
+
