@@ -126,7 +126,7 @@ async def fal_generate(image_url: str, mode: str) -> str:
     # Синхронный (blocking) вызов — Fal вернёт итог сразу.
     # Примечание: у некоторых моделей Fal просит другое имя роутера.
     # Этот работает как общий img2img на базе Flux.
-    fal_url = "https://fal.run/fal-ai/flux-pro/v1.1-ultra"
+    fal_url = "https://fal.run/fal-ai/flux-pro-img2img"
 
     async with httpx.AsyncClient(timeout=300) as client:
         resp = await client.post(fal_url, headers=headers, json=payload)
