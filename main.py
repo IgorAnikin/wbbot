@@ -13,7 +13,7 @@ BOT_TOKEN       = os.getenv("BOT_TOKEN", "")
 SUPABASE_URL    = os.getenv("SUPABASE_URL", "")
 SUPABASE_KEY    = os.getenv("SUPABASE_KEY", "")
 SUPABASE_BUCKET = os.getenv("SUPABASE_BUCKET", "wb-photos")
-FAL_KEY         = os.getenv("FAL_KEY", "")  # ключ fal.ai
+FAL_KEY         = os.getenv("FAL_KEY", "")  # fal.ai API key
 
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN is not set")
@@ -46,17 +46,17 @@ async def start_cmd(msg: Message):
 @router.message(F.text == "📸 Главное фото")
 async def main_photo(msg: Message):
     MODE[msg.chat.id] = "main"
-    await msg.answer("Отправьте фото товара — сделаю главное фото (3:4).")
+    await msg.answer("Отправьте фото товара (лучше как *Файл/Документ*), сделаю главное фото 3:4.")
 
 @router.message(F.text == "📷 Фотосессия (12 снимков)")
 async def set12(msg: Message):
     MODE[msg.chat.id] = "set"
-    await msg.answer("Отправьте фото товара — соберу 12 снимков в одном стиле.")
+    await msg.answer("Отправьте фото товара (лучше как *Файл/Документ*), соберу 12 снимков в одном стиле.")
 
 @router.message(F.text == "💬 Фейк-отзыв")
 async def review(msg: Message):
     MODE[msg.chat.id] = "review"
-    await msg.answer("Отправьте фото товара — пока верну 1 кадр (текст добавим позже).")
+    await msg.answer("Отправьте фото товара (пока верну 1 кадр; текст добавим позже).")
 
 # ---------- Supabase ----------
 def _public_url(path: str) -> str:
@@ -79,29 +79,47 @@ async def sb_upload(content: bytes, suffix: str = ".jpg") -> str:
 # ---------- Fal.ai (img2img через flux-pro) ----------
 FAL_URL = "https://fal.run/fal-ai/flux-pro"
 
+PRESERVE_PREFIX = (
+    "preserve the exact garment from the reference image: same color, print/pattern, fabric texture, "
+    "stitching, silhouette and cut; do not alter the clothing design or details; no logo changes; "
+)
+
+NEGATIVE = (
+    "altered clothing, changed print, different color, wrong fabric, redesign, text, logo, watermark, "
+    "extra fingers, plastic skin, hdr glow, oversmooth"
+)
+
 def preset(mode: str) -> tuple[str, int]:
     if mode == "main":
-        return ("photorealistic ecommerce hero shot, soft daylight, clean warm bedroom,"
-                " focus on garment details, 3:4, high resolution, no watermark, realistic skin", 1)
+        return (
+            PRESERVE_PREFIX +
+            "photorealistic ecommerce hero shot, mobile-photography look, soft daylight, clean warm bedroom, "
+            "mirror selfie framing optional, focus on garment details, aspect 3:4, high resolution, realistic skin",
+            1
+        )
     if mode == "set":
-        return ("photorealistic lifestyle photoshoot for fashion e-commerce, consistent lighting,"
-                " mix of full-body, 3/4, side, back, close-up fabric, minimal interior, 3:4, high resolution,"
-                " no watermark", 12)
-    return ("clean studio-like product modeling photo for marketplace, 3:4, high resolution, no watermark", 1)
+        return (
+            PRESERVE_PREFIX +
+            "photorealistic lifestyle photoshoot for fashion e-commerce, consistent style and lighting across shots, "
+            "mix of full-body, 3/4, side, back, close-up fabric, minimal interior, soft shadows, aspect 3:4, high resolution",
+            12
+        )
+    return (
+        PRESERVE_PREFIX +
+        "clean studio-like product modeling photo for marketplace, aspect 3:4, high resolution",
+        1
+    )
 
-async def fal_img2img(image_url: str, mode: str) -> list[str]:
-    p, n = preset(mode)
+async def fal_img2img(image_url: str, mode: str, strength: float = 0.15) -> list[str]:
+    prompt, n = preset(mode)
     payload = {
-        # В fal.ai наличие image_url включает img2img
-        "prompt": p,
-        "image_url": image_url,
+        "prompt": prompt,
+        "image_url": image_url,          # наличие image_url включает режим img2img
         "num_images": n,
-        "strength": 0.45,                 # бережно к ткани
-        "guidance_scale": 4.0,
-        # === ФИКС: допускаются только предустановки размера ===
-        # square_hd | square | portrait_4_3 | portrait_16_9 | landscape_4_3 | landscape_16_9
-        "image_size": "portrait_4_3",
-        "negative_prompt": "watermark, text, logo, extra fingers, plastic skin, hdr glow, oversmooth"
+        "strength": strength,            # НИЗКИЙ denoise: максимально сохраняем вещь
+        "guidance_scale": 3.2,           # мягкое руководство (меньше «пластика»)
+        "image_size": "portrait_4_3",    # допустимый пресет 3:4
+        "negative_prompt": NEGATIVE
     }
     headers = {"Authorization": f"Key {FAL_KEY}", "Content-Type": "application/json"}
     async with httpx.AsyncClient(timeout=300) as c:
@@ -113,22 +131,39 @@ async def fal_img2img(image_url: str, mode: str) -> list[str]:
         raise RuntimeError(f"Fal response has no images: {data}")
     return [img["url"] if isinstance(img, dict) else img for img in images]
 
-# ---------- Фото-хендлер ----------
-@router.message(F.photo)
-async def on_photo(msg: Message):
-    try:
-        mode = MODE.get(msg.chat.id) or "main"
-        await msg.answer("📥 Фото получено. Загружаю в облако…")
-
+# ---------- Утилита: достать байты файла (photo или document) ----------
+async def get_input_bytes(msg: Message) -> tuple[bytes, str]:
+    # Если прислали «Фото»
+    if msg.photo:
         ph = msg.photo[-1]
         tg_file = await bot.get_file(ph.file_id)
-        file_stream = await bot.download_file(tg_file.file_path)
-        src_bytes = file_stream.read()
+        fs = await bot.download_file(tg_file.file_path)
+        return fs.read(), ".jpg"
+    # Если прислали «Документ» (лучше, без сжатия)
+    if msg.document:
+        tg_file = await bot.get_file(msg.document.file_id)
+        fs = await bot.download_file(tg_file.file_path)
+        # Определим суффикс
+        suffix = ".jpg"
+        name = (msg.document.file_name or "").lower()
+        if name.endswith(".png"): suffix = ".png"
+        elif name.endswith(".webp"): suffix = ".webp"
+        elif name.endswith(".jpeg"): suffix = ".jpg"
+        return fs.read(), suffix
+    raise RuntimeError("Не найдено изображение: пришлите фото или файл-изображение.")
 
-        src_url = await sb_upload(src_bytes, ".jpg")
-        await msg.answer("🧠 Генерирую через Fal.ai…")
+# ---------- Хендлеры приёма изображений ----------
+@router.message(F.photo | F.document)
+async def on_image(msg: Message):
+    try:
+        mode = MODE.get(msg.chat.id) or "main"
+        await msg.answer("📥 Получил. Загружаю исходник в облако…")
 
-        gen_urls = await fal_img2img(src_url, mode)
+        src_bytes, suffix = await get_input_bytes(msg)
+        src_url = await sb_upload(src_bytes, suffix)
+        await msg.answer("🧠 Генерирую через Fal.ai (бережный режим)…")
+
+        gen_urls = await fal_img2img(src_url, mode, strength=0.15)
 
         if mode == "set" and len(gen_urls) > 1:
             links = []
