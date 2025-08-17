@@ -6,12 +6,7 @@ import httpx
 from fastapi import FastAPI, Request
 from aiogram import Bot, Dispatcher, Router, F
 from aiogram.filters import Command
-from aiogram.types import (
-    Message,
-    ReplyKeyboardMarkup,
-    KeyboardButton,
-    Update,
-)
+from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton, Update
 
 # ---------- ENV ----------
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
@@ -19,7 +14,7 @@ if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN is not set")
 
 SUPABASE_URL    = os.getenv("SUPABASE_URL", "")
-SUPABASE_KEY    = os.getenv("SUPABASE_KEY", "")   # anon key допустим
+SUPABASE_KEY    = os.getenv("SUPABASE_KEY", "")   # anon key
 SUPABASE_BUCKET = os.getenv("SUPABASE_BUCKET", "wb-photos")
 
 # ---------- TG ----------
@@ -58,8 +53,8 @@ def _public_url(object_path: str) -> str:
 
 async def upload_to_supabase(file_bytes: bytes, suffix: str = ".jpg") -> str:
     """
-    Загрузка файла в Supabase Storage. Требуются заголовки Authorization + apikey.
-    Для public-бакета включите INSERT-политику (см. README/инструкции).
+    Требуются заголовки Authorization + apikey.
+    Для bucket включены RLS-политики: INSERT: true, SELECT: true.
     """
     if not (SUPABASE_URL and SUPABASE_KEY and SUPABASE_BUCKET):
         raise RuntimeError("SUPABASE_URL/KEY/BUCKET not set")
